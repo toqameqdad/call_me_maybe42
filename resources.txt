@@ -1,0 +1,2 @@
+https://github.com/eepylaurie/call-me-maybe
+https://nanonets.com/cookbooks/structured-llm-outputs/basic-concepts/sampling¬
