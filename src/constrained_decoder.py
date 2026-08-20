@@ -58,6 +58,132 @@ class ConstrainedDecoder:
         """
         return self.model.decode(token_ids)
 
+    def encode_prompt(self, prompt: str) -> list[int]:
+        """Encode a natural-language prompt into input IDs.
+
+        Args:
+            prompt: Natural-language prompt.
+
+        Returns:
+            Token IDs representing the prompt.
+        """
+        encoded = self.model.encode(prompt)
+        return _extract_input_ids(encoded)
+
+    def select_option(
+        self,
+        input_ids: list[int],
+        options: list[str],
+        max_tokens: int,
+    ) -> str:
+        """Select one candidate string using the LLM.
+
+        This mirrors constraint generation: at each step, only
+        tokens that keep at least one candidate option reachable
+        are allowed, and the highest-logit valid token is chosen.
+        Generation stops as soon as one candidate is fully formed.
+
+        Args:
+            input_ids: Full model input sequence so far.
+            options: Candidate literal strings to choose between
+                (e.g. quoted JSON strings such as '"fn_greet"').
+            max_tokens: Maximum tokens available for selection.
+
+        Returns:
+            The candidate option that was fully generated.
+
+        Raises:
+            ValueError: If no option is provided, or no option
+                can be selected within the token budget.
+        """
+        if not options:
+            raise ValueError(
+                "No options provided for selection."
+            )
+
+        if max_tokens <= 0:
+            raise ValueError(
+                "max_tokens must be greater than zero."
+            )
+
+        remaining = list(options)
+        progress_ids: list[int] = []
+
+        for _ in range(max_tokens):
+            candidates = self._candidate_ids_for_options(
+                progress_ids,
+                remaining,
+            )
+
+            if not candidates:
+                raise ValueError(
+                    "No token can continue any candidate "
+                    "option."
+                )
+
+            full_input = [
+                *input_ids,
+                *progress_ids,
+            ]
+
+            logits = self.model.get_logits_from_input_ids(
+                full_input
+            )
+
+            token_id = self._choose_token(
+                logits,
+                candidates,
+            )
+
+            progress_ids.append(token_id)
+            candidate_text = self._decode(progress_ids)
+
+            remaining = [
+                option
+                for option in remaining
+                if option.startswith(candidate_text)
+            ]
+
+            if candidate_text in remaining:
+                return candidate_text
+
+        raise ValueError(
+            "Could not select an option within "
+            f"{max_tokens} tokens."
+        )
+
+    def _candidate_ids_for_options(
+        self,
+        progress_ids: list[int],
+        options: list[str],
+    ) -> list[int]:
+        """Find tokens that can continue at least one option.
+
+        Args:
+            progress_ids: Tokens already generated so far.
+            options: Candidate strings still in the running.
+
+        Returns:
+            Valid candidate token IDs.
+        """
+        candidates: list[int] = []
+
+        for token_id in self.vocabulary.id_to_token:
+            candidate_ids = [
+                *progress_ids,
+                token_id,
+            ]
+
+            candidate_text = self._decode(candidate_ids)
+
+            if any(
+                option.startswith(candidate_text)
+                for option in options
+            ):
+                candidates.append(token_id)
+
+        return candidates
+
     def _candidate_token_ids(
         self,
         constraint: Constraint,
@@ -225,8 +351,7 @@ class ConstrainedDecoder:
 
         state = initial_state(schema)
 
-        encoded = self.model.encode(prompt)
-        input_ids = _extract_input_ids(encoded)
+        input_ids = self.encode_prompt(prompt)
 
         generated_ids: list[int] = []
         generated_text = ""
