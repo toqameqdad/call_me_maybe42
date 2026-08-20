@@ -1,112 +1,94 @@
-"""Pydantic data models for the call_me_maybe function calling project.
+"""Pydantic models used by the Call Me Maybe project."""
 
-These models mirror the exact JSON shapes described in the project spec:
-- functions_definition.json  -> list[FunctionDefinition]
-- function_calling_tests.json -> list[TestPrompt]
-- function_calling_results.json -> list[FunctionCallResult]
-"""
+from typing import Any
 
-from typing import Any, Dict
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ParameterDefinition(BaseModel):
-    """Describes a single parameter of a function (its declared type).
+    """Describe one function parameter."""
 
-    Example (from functions_definition.json):
-        "a": {"type": "number"}
-    """
+    model_config = ConfigDict(extra="forbid")
 
     type: str = Field(
         ...,
-        description=(
-            "Declared type of the parameter, "
-            "e.g. 'number', 'string', 'boolean'."
-        ),
+        description="JSON value type of the parameter.",
     )
 
 
 class ReturnDefinition(BaseModel):
-    """Describes the return type of a function.
+    """Describe a function return value."""
 
-    Example (from functions_definition.json):
-        "returns": {"type": "number"}
-    """
+    model_config = ConfigDict(extra="forbid")
 
     type: str = Field(
         ...,
-        description="Declared return type of the function.",
+        description="JSON value type returned by the function.",
     )
 
 
 class FunctionDefinition(BaseModel):
-    """A single function entry as found in functions_definition.json.
+    """Describe one callable function."""
 
-    Example:
-        {
-            "name": "fn_add_numbers",
-            "description": "Add two numbers together and return their sum",
-            "parameters": {
-                "a": {"type": "number"},
-                "b": {"type": "number"}
-            },
-            "returns": {"type": "number"}
-        }
-    """
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
         ...,
-        description="Name of the callable function.",
+        description="Name of the function.",
     )
+
     description: str = Field(
         ...,
         description="Human-readable description of the function.",
     )
-    parameters: Dict[str, ParameterDefinition] = Field(
-        ...,
-        description="Mapping of parameter name to its type.",
+
+    parameters: dict[str, ParameterDefinition] = Field(
+        default_factory=dict,
+        description="Function parameter definitions.",
     )
+
     returns: ReturnDefinition = Field(
         ...,
-        description="Type definition of the return value.",
+        description="Function return type definition.",
     )
 
 
 class TestPrompt(BaseModel):
-    """A single entry from function_calling_tests.json.
+    """Represent one input prompt."""
 
-    Example:
-        {"prompt": "What is the sum of 2 and 3?"}
-    """
+    model_config = ConfigDict(extra="forbid")
 
     prompt: str = Field(
         ...,
-        description="Natural language request to process.",
+        description="Natural-language user request.",
     )
 
 
 class FunctionCallResult(BaseModel):
-    """A single entry to write into function_calling_results.json.
+    """Represent one final function-calling result.
 
-    Must contain exactly these three keys per the spec
-    (no extra keys, no prose):
+    The serialized object contains exactly:
+
         {
-            "prompt": "What is the sum of 2 and 3?",
-            "name": "fn_add_numbers",
-            "parameters": {"a": 2, "b": 3}
+            "prompt": "...",
+            "name": "...",
+            "parameters": {...}
         }
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     prompt: str = Field(
         ...,
-        description="The original natural-language request.",
+        description="Original user prompt.",
     )
+
     name: str = Field(
         ...,
-        description="Name of the function chosen by the LLM.",
+        description="Function selected by the LLM.",
     )
-    parameters: Dict[str, Any] = Field(
-        ...,
-        description="Resolved arguments, matching the definition.",
+
+    parameters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Arguments generated for the function.",
     )

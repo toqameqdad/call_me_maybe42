@@ -1,24 +1,13 @@
-"""Schema-aware JSON object state machine.
+"""Schema-aware JSON object state machine."""
 
-Unlike the earlier toy version, this does NOT hardcode field names
-like "name" or "age". It reads a schema (a dict of field name ->
-type name, e.g. {"a": "number", "b": "number"}) at runtime and
-drives the same state sequence for any schema:
-
-    START -> KEY -> COLON -> VALUE -> COMMA_OR_END -> ... -> END
-
-This machine only knows LOGICAL constraints (a literal character,
-or "a value of type X is expected here"). It does NOT know about
-vocabulary tokens or token IDs -- translating a logical constraint
-into allowed token IDs is the job of constrained_decoder.py.
-"""
-
-from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, FrozenSet, Tuple
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Kind(Enum):
+    """Represent the current position in JSON generation."""
+
     START = auto()
     KEY = auto()
     COLON = auto()
@@ -27,115 +16,190 @@ class Kind(Enum):
     END = auto()
 
 
-@dataclass(frozen=True)
-class Constraint:
-    """A single logical thing that is allowed right now.
+class Constraint(BaseModel):
+    """Represent one logical JSON constraint.
 
-    Exactly one of the two fields is set:
-      - literal: an exact required string, e.g. "{" or '"a"'
-      - value_type: the type a value must satisfy, e.g. "number"
+    Exactly one of ``literal`` or ``value_type`` must be provided.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     literal: str = ""
     value_type: str = ""
 
+    def model_post_init(self, __context: object) -> None:
+        """Validate the constraint contents."""
+        has_literal = bool(self.literal)
+        has_value_type = bool(self.value_type)
 
-@dataclass(frozen=True)
-class DecoderState:
-    """Where we are in building the JSON object, and what schema
-    we're building it against.
-    """
+        if has_literal == has_value_type:
+            raise ValueError(
+                "Constraint must contain exactly one of "
+                "'literal' or 'value_type'."
+            )
+
+
+class DecoderState(BaseModel):
+    """Represent the current JSON generation state."""
+
+    model_config = ConfigDict(frozen=True)
 
     kind: Kind
-    schema: Dict[str, str]
-    remaining_keys: Tuple[str, ...]
+    schema: dict[str, str] = Field(default_factory=dict)
+    remaining_keys: tuple[str, ...] = ()
     current_key: str = ""
 
 
-def initial_state(schema: Dict[str, str]) -> DecoderState:
-    """Start state for a given schema, e.g. {"a": "number"}."""
+def initial_state(schema: dict[str, str]) -> DecoderState:
+    """Create the initial state for a JSON object.
+
+    Args:
+        schema: Mapping of field names to JSON value types.
+
+    Returns:
+        Initial decoder state.
+
+    Raises:
+        ValueError: If the schema format is invalid.
+    """
+    if not isinstance(schema, dict):
+        raise ValueError("Schema must be a dictionary.")
+
+    for key, value_type in schema.items():
+        if not isinstance(key, str):
+            raise ValueError("Schema keys must be strings.")
+
+        if not isinstance(value_type, str):
+            raise ValueError(
+                f"Type for field {key!r} must be a string."
+            )
+
     return DecoderState(
         kind=Kind.START,
-        schema=schema,
+        schema=dict(schema),
         remaining_keys=tuple(schema.keys()),
     )
 
 
-def get_allowed(state: DecoderState) -> FrozenSet[Constraint]:
-    """Return the logical constraint(s) legal in this state."""
+def get_allowed(
+    state: DecoderState,
+) -> frozenset[Constraint]:
+    """Return constraints allowed in the current state.
+
+    Args:
+        state: Current decoder state.
+
+    Returns:
+        Logical constraints allowed by the state machine.
+    """
     if state.kind == Kind.START:
-        return frozenset({Constraint(literal="{")})
+        return frozenset(
+            {Constraint(literal="{")}
+        )
 
     if state.kind == Kind.KEY:
-        next_key = state.remaining_keys[0]
-        return frozenset({Constraint(literal=f'"{next_key}"')})
+        if not state.remaining_keys:
+            return frozenset(
+                {Constraint(literal="}")}
+            )
+
+        key = state.remaining_keys[0]
+
+        return frozenset(
+            {Constraint(literal=f'"{key}"')}
+        )
 
     if state.kind == Kind.COLON:
-        return frozenset({Constraint(literal=":")})
+        return frozenset(
+            {Constraint(literal=":")}
+        )
 
     if state.kind == Kind.VALUE:
-        expected_type = state.schema[state.current_key]
-        return frozenset({Constraint(value_type=expected_type)})
+        value_type = state.schema.get(state.current_key)
+
+        if value_type is None:
+            raise ValueError(
+                f"No type found for key {state.current_key!r}."
+            )
+
+        return frozenset(
+            {Constraint(value_type=value_type)}
+        )
 
     if state.kind == Kind.COMMA_OR_END:
         if state.remaining_keys:
-            return frozenset({Constraint(literal=",")})
-        return frozenset({Constraint(literal="}")})
+            return frozenset(
+                {Constraint(literal=",")}
+            )
 
-    return frozenset()  # END: nothing more is allowed
+        return frozenset(
+            {Constraint(literal="}")}
+        )
+
+    return frozenset()
 
 
-def advance(state: DecoderState, chosen: Constraint) -> DecoderState:
-    """Consume `chosen` and return the resulting next state.
+def advance(
+    state: DecoderState,
+    chosen: Constraint,
+) -> DecoderState:
+    """Advance the state after completing a constraint.
 
-    Raises ValueError if `chosen` isn't currently allowed.
+    Args:
+        state: Current state.
+        chosen: Completed constraint.
+
+    Returns:
+        New decoder state.
+
+    Raises:
+        ValueError: If the constraint is not allowed.
     """
-    allowed = get_allowed(state)
-    if chosen not in allowed:
-        raise ValueError(f"{chosen} is not allowed in state {state.kind}")
+    if chosen not in get_allowed(state):
+        raise ValueError(
+            f"{chosen} is not allowed in state {state.kind}."
+        )
 
     if state.kind == Kind.START:
-        return DecoderState(
-            kind=Kind.KEY,
-            schema=state.schema,
-            remaining_keys=state.remaining_keys,
+        return state.model_copy(
+            update={"kind": Kind.KEY}
         )
 
     if state.kind == Kind.KEY:
-        key = state.remaining_keys[0]
-        return DecoderState(
-            kind=Kind.COLON,
-            schema=state.schema,
-            remaining_keys=state.remaining_keys[1:],
-            current_key=key,
+        if not state.remaining_keys:
+            raise ValueError("No key available.")
+
+        return state.model_copy(
+            update={
+                "kind": Kind.COLON,
+                "current_key": state.remaining_keys[0],
+            }
         )
 
     if state.kind == Kind.COLON:
-        return DecoderState(
-            kind=Kind.VALUE,
-            schema=state.schema,
-            remaining_keys=state.remaining_keys,
-            current_key=state.current_key,
+        return state.model_copy(
+            update={"kind": Kind.VALUE}
         )
 
     if state.kind == Kind.VALUE:
-        return DecoderState(
-            kind=Kind.COMMA_OR_END,
-            schema=state.schema,
-            remaining_keys=state.remaining_keys,
+        return state.model_copy(
+            update={
+                "kind": Kind.COMMA_OR_END,
+                "remaining_keys": state.remaining_keys[1:],
+                "current_key": "",
+            }
         )
 
     if state.kind == Kind.COMMA_OR_END:
         if chosen.literal == ",":
-            return DecoderState(
-                kind=Kind.KEY,
-                schema=state.schema,
-                remaining_keys=state.remaining_keys,
+            return state.model_copy(
+                update={"kind": Kind.KEY}
             )
-        return DecoderState(
-            kind=Kind.END,
-            schema=state.schema,
-            remaining_keys=state.remaining_keys,
+
+        return state.model_copy(
+            update={"kind": Kind.END}
         )
 
-    raise ValueError(f"Cannot advance from terminal state {state}")
+    raise ValueError(
+        f"Cannot advance from terminal state {state.kind}."
+    )
