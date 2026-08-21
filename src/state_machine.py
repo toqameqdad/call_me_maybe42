@@ -50,6 +50,30 @@ class DecoderState(BaseModel):
     current_key: str = ""
 
 
+def _copy_state(
+    state: DecoderState,
+    *,
+    kind: Kind | None = None,
+    remaining_keys: tuple[str, ...] | None = None,
+    current_key: str | None = None,
+) -> DecoderState:
+    """Return a typed copy of a decoder state."""
+    return DecoderState(
+        kind=state.kind if kind is None else kind,
+        schema=state.schema,
+        remaining_keys=(
+            state.remaining_keys
+            if remaining_keys is None
+            else remaining_keys
+        ),
+        current_key=(
+            state.current_key
+            if current_key is None
+            else current_key
+        ),
+    )
+
+
 def initial_state(schema: dict[str, str]) -> DecoderState:
     """Create the initial state for a JSON object.
 
@@ -70,9 +94,7 @@ def initial_state(schema: dict[str, str]) -> DecoderState:
             raise ValueError("Schema keys must be strings.")
 
         if not isinstance(value_type, str):
-            raise ValueError(
-                f"Type for field {key!r} must be a string."
-            )
+            raise ValueError(f"Type for field {key!r} must be a string.")
 
     return DecoderState(
         kind=Kind.START,
@@ -93,48 +115,32 @@ def get_allowed(
         Logical constraints allowed by the state machine.
     """
     if state.kind == Kind.START:
-        return frozenset(
-            {Constraint(literal="{")}
-        )
+        return frozenset({Constraint(literal="{")})
 
     if state.kind == Kind.KEY:
         if not state.remaining_keys:
-            return frozenset(
-                {Constraint(literal="}")}
-            )
+            return frozenset({Constraint(literal="}")})
 
         key = state.remaining_keys[0]
 
-        return frozenset(
-            {Constraint(literal=f'"{key}"')}
-        )
+        return frozenset({Constraint(literal=f'"{key}"')})
 
     if state.kind == Kind.COLON:
-        return frozenset(
-            {Constraint(literal=":")}
-        )
+        return frozenset({Constraint(literal=":")})
 
     if state.kind == Kind.VALUE:
         value_type = state.schema.get(state.current_key)
 
         if value_type is None:
-            raise ValueError(
-                f"No type found for key {state.current_key!r}."
-            )
+            raise ValueError(f"No type found for key {state.current_key!r}.")
 
-        return frozenset(
-            {Constraint(value_type=value_type)}
-        )
+        return frozenset({Constraint(value_type=value_type)})
 
     if state.kind == Kind.COMMA_OR_END:
         if state.remaining_keys:
-            return frozenset(
-                {Constraint(literal=",")}
-            )
+            return frozenset({Constraint(literal=",")})
 
-        return frozenset(
-            {Constraint(literal="}")}
-        )
+        return frozenset({Constraint(literal="}")})
 
     return frozenset()
 
@@ -156,50 +162,36 @@ def advance(
         ValueError: If the constraint is not allowed.
     """
     if chosen not in get_allowed(state):
-        raise ValueError(
-            f"{chosen} is not allowed in state {state.kind}."
-        )
+        raise ValueError(f"{chosen} is not allowed in state {state.kind}.")
 
     if state.kind == Kind.START:
-        return state.model_copy(
-            update={"kind": Kind.KEY}
-        )
+        return _copy_state(state, kind=Kind.KEY)
 
     if state.kind == Kind.KEY:
         if not state.remaining_keys:
             raise ValueError("No key available.")
 
-        return state.model_copy(
-            update={
-                "kind": Kind.COLON,
-                "current_key": state.remaining_keys[0],
-            }
+        return _copy_state(
+            state,
+            kind=Kind.COLON,
+            current_key=state.remaining_keys[0],
         )
 
     if state.kind == Kind.COLON:
-        return state.model_copy(
-            update={"kind": Kind.VALUE}
-        )
+        return _copy_state(state, kind=Kind.VALUE)
 
     if state.kind == Kind.VALUE:
-        return state.model_copy(
-            update={
-                "kind": Kind.COMMA_OR_END,
-                "remaining_keys": state.remaining_keys[1:],
-                "current_key": "",
-            }
+        return _copy_state(
+            state,
+            kind=Kind.COMMA_OR_END,
+            remaining_keys=state.remaining_keys[1:],
+            current_key="",
         )
 
     if state.kind == Kind.COMMA_OR_END:
         if chosen.literal == ",":
-            return state.model_copy(
-                update={"kind": Kind.KEY}
-            )
+            return _copy_state(state, kind=Kind.KEY)
 
-        return state.model_copy(
-            update={"kind": Kind.END}
-        )
+        return _copy_state(state, kind=Kind.END)
 
-    raise ValueError(
-        f"Cannot advance from terminal state {state.kind}."
-    )
+    raise ValueError(f"Cannot advance from terminal state {state.kind}.")

@@ -15,9 +15,8 @@ clean:
 	rm -rf data/output
 
 lint:
-	uv run python3 -m flake8 .
-	uv run python3 -m mypy . \
-		--warn-return-any \
+	flake8 src --exclude=.venv,venv,__pycache__,.git
+	mypy src --warn-return-any \
 		--warn-unused-ignores \
 		--ignore-missing-imports \
 		--disallow-untyped-defs \

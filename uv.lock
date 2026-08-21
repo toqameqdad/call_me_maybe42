@@ -138,7 +138,6 @@ name = "call-me-maybe"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "huggingface-hub" },
     { name = "numpy" },
     { name = "pydantic" },
     { name = "torch" },
@@ -154,7 +153,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "huggingface-hub", specifier = ">=1.28.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "torch", specifier = ">=2.13.0" },

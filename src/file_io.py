@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -62,8 +63,15 @@ def load_functions_definitions(
     raw_data = _read_json(path)
 
     try:
-        adapter = TypeAdapter(list[FunctionDefinition])
-        return adapter.validate_python(raw_data)
+        adapter: TypeAdapter[list[FunctionDefinition]] = TypeAdapter(
+            list[FunctionDefinition]
+        )
+        validated = adapter.validate_python(raw_data)
+
+        return cast(
+            list[FunctionDefinition],
+            validated,
+        )
     except ValidationError as error:
         raise RuntimeError(
             f"Invalid function definitions in {path}: {error}"
@@ -87,8 +95,15 @@ def load_test_prompts(
     raw_data = _read_json(path)
 
     try:
-        adapter = TypeAdapter(list[TestPrompt])
-        return adapter.validate_python(raw_data)
+        adapter: TypeAdapter[list[TestPrompt]] = TypeAdapter(
+            list[TestPrompt]
+        )
+        validated = adapter.validate_python(raw_data)
+
+        return cast(
+            list[TestPrompt],
+            validated,
+        )
     except ValidationError as error:
         raise RuntimeError(
             f"Invalid test prompts in {path}: {error}"
