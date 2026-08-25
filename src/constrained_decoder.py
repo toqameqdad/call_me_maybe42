@@ -1,8 +1,10 @@
-"""Constrained decoding for schema-aware JSON generation."""
+"""Schema-aware constrained decoding for JSON function calls."""
 
+import heapq
 import json
 import math
 import re
+from typing import Callable, Iterable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -28,47 +30,39 @@ class DecodeResult(BaseModel):
 
 
 class ConstrainedDecoder:
-    """Generate JSON while respecting logical constraints."""
+    """Generate JSON with schema-aware token constraints.
+
+    The implementation uses only the public ``llm_sdk`` API.  Token
+    filtering is performed from cached single-token decoded text, while
+    the selected token is always appended to the real generation context.
+    This avoids decoding every candidate sequence at every generation step.
+    """
+
+    _TOP_K = 4096
 
     def __init__(
         self,
         model: Small_LLM_Model,
         vocabulary: Vocabulary,
     ) -> None:
-        """Initialize the decoder.
-
-        Args:
-            model: LLM SDK model.
-            vocabulary: Model vocabulary.
-        """
+        """Initialize the decoder."""
         self.model = model
         self.vocabulary = vocabulary
+        self._token_text_cache: dict[int, str] = {}
 
-    def _decode(
-        self,
-        token_ids: list[int],
-    ) -> str:
-        """Decode a complete token sequence.
+    def _token_text(self, token_id: int) -> str:
+        """Decode one vocabulary token and cache its text."""
+        if token_id not in self._token_text_cache:
+            self._token_text_cache[token_id] = self.model.decode([token_id])
+        return self._token_text_cache[token_id]
 
-        Args:
-            token_ids: Token IDs to decode.
-
-        Returns:
-            Decoded text.
-        """
+    def _decode(self, token_ids: list[int]) -> str:
+        """Decode a complete generated sequence."""
         return self.model.decode(token_ids)
 
     def encode_prompt(self, prompt: str) -> list[int]:
-        """Encode a natural-language prompt into input IDs.
-
-        Args:
-            prompt: Natural-language prompt.
-
-        Returns:
-            Token IDs representing the prompt.
-        """
-        encoded = self.model.encode(prompt)
-        return _extract_input_ids(encoded)
+        """Encode a natural-language prompt into model input IDs."""
+        return _extract_input_ids(self.model.encode(prompt))
 
     def select_option(
         self,
@@ -76,187 +70,93 @@ class ConstrainedDecoder:
         options: list[str],
         max_tokens: int,
     ) -> str:
-        """Select one candidate string using the LLM.
-
-        This mirrors constraint generation: at each step, only
-        tokens that keep at least one candidate option reachable
-        are allowed, and the highest-logit valid token is chosen.
-        Generation stops as soon as one candidate is fully formed.
-
-        Args:
-            input_ids: Full model input sequence so far.
-            options: Candidate literal strings to choose between
-                (e.g. quoted JSON strings such as '"fn_greet"').
-            max_tokens: Maximum tokens available for selection.
-
-        Returns:
-            The candidate option that was fully generated.
-
-        Raises:
-            ValueError: If no option is provided, or no option
-                can be selected within the token budget.
-        """
+        """Select one literal option using constrained decoding."""
         if not options:
-            raise ValueError(
-                "No options provided for selection."
-            )
-
+            raise ValueError("No options provided for selection.")
         if max_tokens <= 0:
-            raise ValueError(
-                "max_tokens must be greater than zero."
-            )
+            raise ValueError("max_tokens must be greater than zero.")
 
-        remaining = list(options)
         progress_ids: list[int] = []
+        prefix = ""
 
         for _ in range(max_tokens):
-            candidates = self._candidate_ids_for_options(
-                progress_ids,
-                remaining,
-            )
-
-            if not candidates:
-                raise ValueError(
-                    "No token can continue any candidate "
-                    "option."
-                )
-
-            full_input = [
-                *input_ids,
-                *progress_ids,
-            ]
-
             logits = self.model.get_logits_from_input_ids(
-                full_input
+                [*input_ids, *progress_ids]
             )
-
-            token_id = self._choose_token(
+            token_id, candidate = self._choose_candidate(
                 logits,
-                candidates,
+                progress_ids,
+                prefix,
+                lambda text: any(
+                    option.startswith(text) for option in options
+                ),
             )
-
             progress_ids.append(token_id)
-            candidate_text = self._decode(progress_ids)
+            prefix = candidate
 
-            remaining = [
-                option
-                for option in remaining
-                if option.startswith(candidate_text)
-            ]
-
-            if candidate_text in remaining:
-                return candidate_text
+            if prefix in options:
+                return prefix
 
         raise ValueError(
-            "Could not select an option within "
-            f"{max_tokens} tokens."
+            f"Could not select an option within {max_tokens} tokens."
         )
 
-    def _candidate_ids_for_options(
-        self,
-        progress_ids: list[int],
-        options: list[str],
-    ) -> list[int]:
-        """Find tokens that can continue at least one option.
-
-        Args:
-            progress_ids: Tokens already generated so far.
-            options: Candidate strings still in the running.
-
-        Returns:
-            Valid candidate token IDs.
-        """
-        candidates: list[int] = []
-
-        for token_id in self.vocabulary.id_to_token:
-            candidate_ids = [
-                *progress_ids,
-                token_id,
-            ]
-
-            candidate_text = self._decode(candidate_ids)
-
-            if any(
-                option.startswith(candidate_text)
-                for option in options
-            ):
-                candidates.append(token_id)
-
-        return candidates
-
-    def _candidate_token_ids(
-        self,
-        constraint: Constraint,
-        progress_ids: list[int],
-    ) -> list[int]:
-        """Find tokens that can continue a constraint.
-
-        Args:
-            constraint: Logical constraint.
-            progress_ids: Tokens already generated for this constraint.
-
-        Returns:
-            Valid candidate token IDs.
-        """
-        candidates: list[int] = []
-
-        for token_id in self.vocabulary.id_to_token:
-            candidate_ids = [
-                *progress_ids,
-                token_id,
-            ]
-
-            candidate_text = self._decode(candidate_ids)
-
-            if constraint.literal:
-                if _literal_prefix_is_valid(
-                    candidate_text,
-                    constraint.literal,
-                ):
-                    candidates.append(token_id)
-
-            elif constraint.value_type:
-                if _value_prefix_is_valid(
-                    candidate_text,
-                    constraint.value_type,
-                ):
-                    candidates.append(token_id)
-
-        return candidates
-
-    def _choose_token(
+    def _choose_candidate(
         self,
         logits: list[float],
-        candidates: list[int],
-    ) -> int:
-        """Choose the highest-logit candidate.
+        progress_ids: list[int],
+        prefix: str,
+        validator: Callable[[str], bool],
+    ) -> tuple[int, str]:
+        """Choose the highest-logit token satisfying a prefix validator."""
+        del progress_ids  # Kept in the API for generation-state clarity.
 
-        Args:
-            logits: Model logits.
-            candidates: Allowed token IDs.
+        ranked = _top_logit_ids(logits, self._TOP_K)
+        result = self._best_from_ids(ranked, logits, prefix, validator)
+        if result is not None:
+            return result
 
-        Returns:
-            Selected token ID.
+        # A valid token can have a low logit early in generation.  Fall back
+        # to the full vocabulary only when the cheap top-k pass found none.
+        all_ids = range(len(logits))
+        result = self._best_from_ids(all_ids, logits, prefix, validator)
+        if result is not None:
+            return result
 
-        Raises:
-            ValueError: If no valid candidate exists.
-        """
-        valid = [
-            token_id
-            for token_id in candidates
-            if 0 <= token_id < len(logits)
-            and math.isfinite(logits[token_id])
-        ]
+        raise ValueError("No token can continue the current constraint.")
 
-        if not valid:
-            raise ValueError(
-                "No valid token has a usable model logit."
-            )
+    def _best_from_ids(
+        self,
+        token_ids: Iterable[int],
+        logits: list[float],
+        prefix: str,
+        validator: Callable[[str], bool],
+    ) -> tuple[int, str] | None:
+        """Return the best valid token from a supplied ID sequence."""
+        best_id: int | None = None
+        best_text = ""
+        best_score = float("-inf")
 
-        return max(
-            valid,
-            key=lambda token_id: logits[token_id],
-        )
+        for token_id in token_ids:
+            if token_id < 0 or token_id >= len(logits):
+                continue
+            score = logits[token_id]
+            if not math.isfinite(score) or score <= best_score:
+                continue
+
+            token_text = self._token_text(token_id)
+            if not token_text:
+                continue
+
+            candidate = prefix + token_text
+            if validator(candidate):
+                best_id = token_id
+                best_text = candidate
+                best_score = score
+
+        if best_id is None:
+            return None
+        return best_id, best_text
 
     def _generate_constraint(
         self,
@@ -264,61 +164,35 @@ class ConstrainedDecoder:
         constraint: Constraint,
         max_tokens: int,
     ) -> tuple[list[int], str]:
-        """Generate tokens until one constraint is complete.
-
-        Args:
-            input_ids: Full model input sequence.
-            constraint: Constraint to satisfy.
-            max_tokens: Maximum tokens available.
-
-        Returns:
-            Generated token IDs and decoded constraint text.
-
-        Raises:
-            ValueError: If the constraint cannot be completed.
-        """
+        """Generate one complete schema constraint."""
         constraint_ids: list[int] = []
+        prefix = ""
 
         for _ in range(max_tokens):
-            candidates = self._candidate_token_ids(
-                constraint,
-                constraint_ids,
+            logits = self.model.get_logits_from_input_ids(
+                [*input_ids, *constraint_ids]
             )
 
-            if not candidates:
-                raise ValueError(
-                    "No token can continue constraint "
-                    f"{constraint}."
+            if constraint.literal:
+                validator = lambda text, literal=constraint.literal: (
+                    _literal_prefix_is_valid(text, literal)
+                )
+            else:
+                validator = lambda text, value_type=constraint.value_type: (
+                    _value_prefix_is_valid(text, value_type)
                 )
 
-            full_input = [
-                *input_ids,
-                *constraint_ids,
-            ]
-
-            logits = self.model.get_logits_from_input_ids(
-                full_input
-            )
-
-            token_id = self._choose_token(
+            token_id, candidate = self._choose_candidate(
                 logits,
-                candidates,
+                constraint_ids,
+                prefix,
+                validator,
             )
-
-            candidate_ids = [
-                *constraint_ids,
-                token_id,
-            ]
-
-            candidate_text = self._decode(candidate_ids)
-
             constraint_ids.append(token_id)
+            prefix = candidate
 
-            if _constraint_is_complete(
-                candidate_text,
-                constraint,
-            ):
-                return constraint_ids, candidate_text
+            if _constraint_is_complete(prefix, constraint):
+                return constraint_ids, prefix
 
         raise ValueError(
             "Constraint could not be completed within "
@@ -331,228 +205,155 @@ class ConstrainedDecoder:
         schema: dict[str, str],
         max_tokens: int = 256,
     ) -> DecodeResult:
-        """Generate schema-constrained JSON.
-
-        Args:
-            prompt: Natural-language prompt.
-            schema: JSON field names and their expected types.
-            max_tokens: Maximum generated token count.
-
-        Returns:
-            Generated text and token IDs.
-
-        Raises:
-            ValueError: If constrained generation fails.
-        """
+        """Generate a JSON object satisfying the supplied schema."""
         if max_tokens <= 0:
-            raise ValueError(
-                "max_tokens must be greater than zero."
-            )
+            raise ValueError("max_tokens must be greater than zero.")
 
         state = initial_state(schema)
-
         input_ids = self.encode_prompt(prompt)
-
         generated_ids: list[int] = []
         generated_text = ""
 
         while state.kind != Kind.END:
             remaining = max_tokens - len(generated_ids)
-
             if remaining <= 0:
-                raise ValueError(
-                    "Maximum generation token limit reached."
-                )
+                raise ValueError("Maximum generation token limit reached.")
 
             allowed = get_allowed(state)
-
             if not allowed:
-                raise ValueError(
-                    f"No constraints available in state "
-                    f"{state.kind}."
-                )
+                raise ValueError(f"No constraints available in state {state.kind}.")
 
             constraint = self._select_constraint(
-                input_ids=[
-                    *input_ids,
-                    *generated_ids,
-                ],
-                constraints=allowed,
+                [*input_ids, *generated_ids],
+                allowed,
             )
-
-            constraint_ids, constraint_text = (
-                self._generate_constraint(
-                    input_ids=[
-                        *input_ids,
-                        *generated_ids,
-                    ],
-                    constraint=constraint,
-                    max_tokens=remaining,
-                )
-            )
-
-            generated_ids.extend(constraint_ids)
-            generated_text += constraint_text
-
-            state = advance(
-                state,
+            ids, text = self._generate_constraint(
+                [*input_ids, *generated_ids],
                 constraint,
+                remaining,
             )
+            generated_ids.extend(ids)
+            generated_text += text
+            state = advance(state, constraint)
 
-        _validate_json(
-            generated_text,
-            schema,
-        )
-
-        return DecodeResult(
-            text=generated_text,
-            token_ids=generated_ids,
-        )
+        # Re-decode once as a final guard against tokenizer composition issues.
+        final_text = self._decode(generated_ids)
+        _validate_json(final_text, schema)
+        return DecodeResult(text=final_text, token_ids=generated_ids)
 
     def _select_constraint(
         self,
         input_ids: list[int],
         constraints: frozenset[Constraint],
     ) -> Constraint:
-        """Select the highest-scoring valid constraint.
-
-        Args:
-            input_ids: Current model input IDs.
-            constraints: Constraints allowed by the state machine.
-
-        Returns:
-            Selected constraint.
-
-        Raises:
-            ValueError: If no constraint can be continued.
-        """
+        """Select the highest-scoring constraint that can start."""
         if len(constraints) == 1:
             return next(iter(constraints))
 
-        logits = self.model.get_logits_from_input_ids(
-            input_ids
-        )
-
-        best_constraint: Constraint | None = None
+        logits = self.model.get_logits_from_input_ids(input_ids)
+        best: Constraint | None = None
         best_score = float("-inf")
 
         for constraint in constraints:
-            candidates = self._candidate_token_ids(
-                constraint,
-                [],
-            )
-
-            if not candidates:
+            try:
+                token_id, _ = self._choose_candidate(
+                    logits,
+                    [],
+                    "",
+                    lambda text, c=constraint: _constraint_prefix_is_valid(
+                        text, c
+                    ),
+                )
+            except ValueError:
                 continue
 
-            token_id = self._choose_token(
-                logits,
-                candidates,
-            )
-
             score = logits[token_id]
-
             if score > best_score:
                 best_score = score
-                best_constraint = constraint
+                best = constraint
 
-        if best_constraint is None:
-            raise ValueError(
-                "No valid constraint can be selected."
-            )
-
-        return best_constraint
+        if best is None:
+            raise ValueError("No valid constraint can be selected.")
+        return best
 
 
-def _literal_prefix_is_valid(
-    candidate: str,
-    literal: str,
-) -> bool:
-    """Return whether candidate is a literal prefix."""
+def _top_logit_ids(logits: list[float], limit: int) -> Iterable[int]:
+    """Yield the highest-scoring finite token IDs."""
+    ranked = heapq.nlargest(
+        min(limit, len(logits)),
+        (
+            (score, token_id)
+            for token_id, score in enumerate(logits)
+            if math.isfinite(score)
+        ),
+    )
+    return (token_id for _, token_id in ranked)
+
+
+def _constraint_prefix_is_valid(candidate: str, constraint: Constraint) -> bool:
+    """Return whether candidate is a valid constraint prefix."""
+    if constraint.literal:
+        return _literal_prefix_is_valid(candidate, constraint.literal)
+    return _value_prefix_is_valid(candidate, constraint.value_type)
+
+
+def _literal_prefix_is_valid(candidate: str, literal: str) -> bool:
+    """Return whether candidate is a prefix of a literal."""
     return literal.startswith(candidate)
 
 
-def _value_prefix_is_valid(
-    candidate: str,
-    value_type: str,
-) -> bool:
+def _value_prefix_is_valid(candidate: str, value_type: str) -> bool:
     """Return whether candidate can be a JSON value prefix."""
     if value_type == "string":
         return _valid_string_prefix(candidate)
-
     if value_type == "number":
         return _valid_number_prefix(candidate)
-
     if value_type == "boolean":
         return _valid_boolean_prefix(candidate)
-
     if value_type == "null":
         return "null".startswith(candidate)
-
-    raise ValueError(
-        f"Unsupported value type: {value_type!r}"
-    )
+    raise ValueError(f"Unsupported value type: {value_type!r}")
 
 
-def _constraint_is_complete(
-    value: str,
-    constraint: Constraint,
-) -> bool:
+def _constraint_is_complete(value: str, constraint: Constraint) -> bool:
     """Return whether a constraint is fully generated."""
     if constraint.literal:
         return value == constraint.literal
-
-    return _value_is_complete(
-        value,
-        constraint.value_type,
-    )
+    return _value_is_complete(value, constraint.value_type)
 
 
-def _value_is_complete(
-    value: str,
-    value_type: str,
-) -> bool:
+def _value_is_complete(value: str, value_type: str) -> bool:
     """Return whether a JSON value is complete."""
     if value_type == "string":
         if not _valid_string_prefix(value):
             return False
-
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
             return False
-
-        return isinstance(parsed, str)
+        # Avoid accepting an empty string immediately when the model has
+        # been asked to extract a concrete argument from natural language.
+        return isinstance(parsed, str) and parsed != ""
 
     if value_type == "number":
         if not _valid_number_prefix(value):
             return False
-
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
             return False
-
-        return (
-            isinstance(parsed, (int, float))
-            and not isinstance(parsed, bool)
-        )
+        return isinstance(parsed, (int, float)) and not isinstance(parsed, bool)
 
     if value_type == "boolean":
         return value in {"true", "false"}
-
     if value_type == "null":
         return value == "null"
-
     return False
 
 
 def _valid_boolean_prefix(value: str) -> bool:
     """Return whether value prefixes true or false."""
-    return (
-        "true".startswith(value)
-        or "false".startswith(value)
-    )
+    return "true".startswith(value) or "false".startswith(value)
 
 
 def _valid_number_prefix(value: str) -> bool:
@@ -561,149 +362,93 @@ def _valid_number_prefix(value: str) -> bool:
         return True
 
     pattern = re.compile(
-        r"^-?(?:0|[1-9][0-9]*)"
-        r"(?:\.[0-9]*)?"
-        r"(?:[eE][+-]?[0-9]*)?$"
+        r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]*)?(?:[eE][+-]?[0-9]*)?$"
     )
-
     if value in {"-", "-.", ".", "-e", "-E"}:
         return False
-
     if pattern.fullmatch(value):
         return True
 
-    if value in {"0.", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."}:
-        return True
-
-    exponent_match = re.fullmatch(
-        r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]*)?[eE][+-]?$",
-        value,
+    return bool(
+        re.fullmatch(
+            r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]*)?[eE][+-]?$",
+            value,
+        )
     )
-
-    return exponent_match is not None
 
 
 def _valid_string_prefix(value: str) -> bool:
     """Return whether value is a valid JSON string prefix."""
     if not value:
         return True
-
     if not value.startswith('"'):
         return False
 
     escaped = False
     index = 1
-
     while index < len(value):
         char = value[index]
-
         if escaped:
             if char not in '"\\/bfnrtu':
                 return False
-
             if char == "u":
                 remaining = value[index + 1:index + 5]
-
                 if len(remaining) < 4:
                     return True
-
-                if not re.fullmatch(
-                    r"[0-9a-fA-F]{4}",
-                    remaining,
-                ):
+                if not re.fullmatch(r"[0-9a-fA-F]{4}", remaining):
                     return False
-
                 index += 4
-
             escaped = False
-
         elif char == "\\":
             escaped = True
-
         elif char == '"':
             if index != len(value) - 1:
                 return False
-
         elif ord(char) < 0x20:
             return False
-
         index += 1
-
     return True
 
 
 def _extract_input_ids(encoded: object) -> list[int]:
     """Extract input IDs from the SDK tensor."""
     if not hasattr(encoded, "tolist"):
-        raise ValueError(
-            "The result of encode() does not support tolist()."
-        )
-
+        raise ValueError("The result of encode() does not support tolist().")
     values = encoded.tolist()
-
     if not isinstance(values, list):
-        raise ValueError(
-            "Unexpected result returned by encode()."
-        )
-
+        raise ValueError("Unexpected result returned by encode().")
     if values and isinstance(values[0], list):
         values = values[0]
-
     if not all(isinstance(value, int) for value in values):
-        raise ValueError(
-            "Encoded input IDs must be integers."
-        )
-
+        raise ValueError("Encoded input IDs must be integers.")
     return values
 
 
-def _validate_json(
-    text: str,
-    schema: dict[str, str],
-) -> None:
+def _validate_json(text: str, schema: dict[str, str]) -> None:
     """Validate generated JSON against the expected schema."""
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Generated output is not valid JSON: {exc}"
-        ) from exc
+        raise ValueError(f"Generated output is not valid JSON: {exc}") from exc
 
     if not isinstance(data, dict):
-        raise ValueError(
-            "Generated output must be a JSON object."
-        )
-
+        raise ValueError("Generated output must be a JSON object.")
     if set(data.keys()) != set(schema.keys()):
-        raise ValueError(
-            "Generated keys do not match the schema."
-        )
+        raise ValueError("Generated keys do not match the schema.")
 
     for key, value_type in schema.items():
         value = data[key]
-
         if value_type == "string":
             valid = isinstance(value, str)
-
         elif value_type == "number":
-            valid = (
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-            )
-
+            valid = isinstance(value, (int, float)) and not isinstance(value, bool)
         elif value_type == "boolean":
             valid = isinstance(value, bool)
-
         elif value_type == "null":
             valid = value is None
-
         else:
-            raise ValueError(
-                f"Unsupported value type: {value_type!r}"
-            )
-
+            raise ValueError(f"Unsupported schema type: {value_type!r}")
         if not valid:
             raise ValueError(
-                f"Invalid type for field {key!r}: "
-                f"expected {value_type!r}."
+                f"Invalid type for {key!r}: expected {value_type!r}."
             )
