@@ -1,4 +1,4 @@
-*This activity has been created as part of the 42 curriculum by <login>.*
+*This activity has been created as part of the 42 curriculum by tmeqdad.*
 
 # Call Me Maybe
 
