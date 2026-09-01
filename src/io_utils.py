@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 from pydantic import ValidationError
-from .models import FunctionDefinition, TestPrompt
+from .models import FunctionDefinition, TestPrompt, validate_function_list
 
 
 class InputError(Exception):
@@ -72,7 +72,9 @@ def load_function_definitions(path: Path) -> list[FunctionDefinition]:
             f"{path}: expected a JSON array of function definitions."
         )
     try:
-        return [FunctionDefinition.model_validate(item) for item in raw]
+        functions = [FunctionDefinition(**item) for item in raw] 
+        validate_function_list(functions)  
+        return functions
     except ValidationError as exc:
         raise InputError(
             f"{path}: invalid function definition:\n{exc}"

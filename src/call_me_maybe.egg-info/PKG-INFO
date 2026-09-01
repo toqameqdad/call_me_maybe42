@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: call-me-maybe
+Version: 0.1.0
+Summary: Function calling in LLMs via constrained decoding
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.24
+Requires-Dist: pydantic>=2.5
+Requires-Dist: llm-sdk

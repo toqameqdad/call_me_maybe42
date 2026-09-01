@@ -26,6 +26,7 @@ class ConstrainedDecoder:
         logits_fn: LogitsFn,
         encode_fn: EncodeFn,
         max_steps: int = 256,
+        repetition_penalty: float = 2.0,
     ) -> None:
         """Set up the decoder for a fixed set of functions.
 
@@ -35,12 +36,23 @@ class ConstrainedDecoder:
             logits_fn: Returns next-token logits for a token-id context.
             encode_fn: Encodes prompt text into initial token ids.
             max_steps: Safety cap on generated tokens.
+            repetition_penalty: Amount subtracted from a token's logit
+                for each prior time it was chosen this decode. Without
+                this, an unusual prompt can leave every legal option
+                unappealing to the model except the one it just
+                produced, so it keeps re-picking that same digit or
+                character until ``max_steps`` is hit. The penalty
+                grows with each repeat, so any such loop is eventually
+                broken in favour of the next-best legal token (e.g.
+                the terminator), instead of stalling for the full
+                step budget.
         """
         self._functions = functions
         self._vocab = vocabulary
         self._logits_fn = logits_fn
         self._encode = encode_fn
         self._max_steps = max_steps
+        self._repetition_penalty = repetition_penalty
         self._id_to_text = [
             vocabulary.token_text(i) for i in range(len(vocabulary))
         ]
@@ -58,12 +70,27 @@ class ConstrainedDecoder:
                 legal.append(tid)
         return legal
 
-    def _select(self, logits: Sequence[float], legal: list[int]) -> int:
-        """Pick the highest-logit legal token (illegal -> -inf)."""
+    def _select(
+        self,
+        logits: Sequence[float],
+        legal: list[int],
+        counts: dict[int, int],
+    ) -> int:
+        """Pick the highest-logit legal token (illegal -> -inf).
+
+        Args:
+            logits: Raw next-token logits.
+            legal: Token ids currently allowed by the constraint.
+            counts: Number of prior times each token id was chosen
+                this decode, used to penalise repeats.
+        """
         arr = np.asarray(logits, dtype=np.float64)
         masked = np.full(arr.shape, -np.inf, dtype=np.float64)
         idx = np.asarray(legal, dtype=np.int64)
         masked[idx] = arr[idx]
+        for tid, count in counts.items():
+            if count and masked[tid] != -np.inf:
+                masked[tid] -= self._repetition_penalty * count
         return int(np.argmax(masked))
 
     def decode(self, prompt: str, on_step: StepFn | None = None) -> str:
@@ -81,10 +108,11 @@ class ConstrainedDecoder:
             DecodingError: If no legal token exists or the step cap is
                 exceeded before completion.
         """
-        constraint = FunctionCallConstraint(self._functions)
+        constraint = FunctionCallConstraint(self._functions ,prompt= prompt)
         input_ids = list(self._encode(prompt))
         generated = ""
         steps = 0
+        counts: dict[int, int] = {}
         while not constraint.is_complete():
             if steps >= self._max_steps:
                 raise DecodingError("exceeded max decoding steps")
@@ -93,7 +121,8 @@ class ConstrainedDecoder:
             legal = self._legal_token_ids(constraint)
             if not legal:
                 raise DecodingError("no legal token at this step")
-            best = self._select(logits, legal)
+            best = self._select(logits, legal, counts)
+            counts[best] = counts.get(best, 0) + 1
             text = self._id_to_text[best]
             for ch in text:
                 constraint.advance(ch)

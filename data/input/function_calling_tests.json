@@ -1,9 +1,9 @@
 [
   {
-    "prompt": "What is the sum of 2 and 3?"
+    "prompt": "What is the sum of 2222222 and 333333?"
   },
   {
-    "prompt": "What is the sum of 265 and 345?"
+    "prompt": "calculate 265 and 345?"
   },
   {
     "prompt": "Greet shrek"
@@ -12,10 +12,10 @@
     "prompt": "Greet john"
   },
   {
-    "prompt": "Reverse the string 'hello'"
+    "prompt": "Reverse the string ''"
   },
   {
-    "prompt": "Reverse the string 'world'"
+    "prompt": "Reverse the string '11'"
   },
   {
     "prompt": "What is the square root of 16?"
@@ -30,6 +30,6 @@
     "prompt": "Replace all vowels in 'Programming is fun' with asterisks"
   },
   {
-    "prompt": "Substitute the word 'cat' with 'dog' in 'The cat sat on the mat with another cat'"
+    "prompt": "What's the weather in Amman today?"
   }
 ]

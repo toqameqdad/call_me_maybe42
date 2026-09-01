@@ -1,6 +1,7 @@
 """Constraint state machine for schema-valid function-call JSON."""
 
 from __future__ import annotations
+import re
 from enum import Enum, auto
 from .models import FunctionDefinition
 
@@ -35,6 +36,41 @@ _LITERALS = {
 DIGITS = set("0123456789")
 PRINTABLE = frozenset(chr(c) for c in range(0x20, 0x7F))
 BOOLEANS = ("true", "false")
+
+# Hard bounds on open-ended values. These exist purely so a stuck or
+# ambiguous prompt cannot leave the decoder spinning on the same value
+# forever (e.g. re-adding digits or characters past any point a real
+# answer would need). They are set far above what any legitimate
+# large number or ordinary string would require, so normal generation
+# always finishes long before hitting them.
+MAX_INT_DIGITS = 40
+MAX_FRAC_DIGITS = 6
+MAX_STRING_CHARS = 300
+
+# Matches integers and decimals (optionally signed) written literally
+# in a prompt, e.g. "222222222222222" or "-3.14". Used to "ground"
+# number decoding: when the value being copied for a parameter matches
+# a number that actually appears in the prompt, we restrict the next
+# character to only what keeps it matching that number, so the model
+# cannot silently swap/garble digits mid-copy. This is a decoding-time
+# guard, not a hardcoded value — it works for whatever numbers happen
+# to be in whatever prompt is given.
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _extract_prompt_numbers(prompt: str) -> list[str]:
+    """Return every number literally written in ``prompt``, as text.
+
+    Args:
+        prompt: The raw user prompt string.
+
+    Returns:
+        The numbers found, in the exact text form they appear in
+        (no float conversion, so precision/formatting is preserved).
+    """
+    return _NUMBER_RE.findall(prompt)
+
+
 _Snapshot = tuple[
     Phase,
     str,
@@ -46,6 +82,7 @@ _Snapshot = tuple[
     str,
     str,
     bool,
+    int,
     str,
     str,
 ]
@@ -54,13 +91,21 @@ _Snapshot = tuple[
 class FunctionCallConstraint:
     """Tracks which characters keep the output on a valid path."""
 
-    def __init__(self, functions: list[FunctionDefinition]) -> None:
+    def __init__(
+        self,
+        functions: list[FunctionDefinition],
+        prompt: str | None = None,
+    ) -> None:
         """Initialise the machine for one prompt.
 
         Args:
             functions: The available function definitions. Each name is
                 a candidate; the chosen one's parameters drive the
                 value phases.
+            prompt: The raw prompt text, if available. When given, any
+                numbers written literally in it are used to ground
+                number decoding (see ``_grounded_candidates``) so
+                digits can't be swapped or garbled mid-copy.
 
         Raises:
             ValueError: If no functions are available.
@@ -69,6 +114,7 @@ class FunctionCallConstraint:
             raise ValueError("No function definitions were provided.")
         self._functions = functions
         self._names = [fn.name for fn in functions]
+        self._prompt_numbers = _extract_prompt_numbers(prompt) if prompt else []
 
         self._phase = Phase.PREFIX
         self._output = ""
@@ -81,6 +127,7 @@ class FunctionCallConstraint:
         self._number_so_far = ""
         self._number_type = ""
         self._string_opened = False
+        self._string_len = 0
         self._bool_so_far = ""
 
     def _enter(self, phase: Phase) -> None:
@@ -129,8 +176,39 @@ class FunctionCallConstraint:
                 chars.add(name[pos])
         return chars
 
+    def _grounded_candidates(self) -> list[str] | None:
+        """Prompt numbers that still match what's been typed so far.
+
+        Returns:
+            The subset of ``self._prompt_numbers`` that ``self._number_so_far``
+            is a prefix of, or ``None`` when grounding doesn't apply (no
+            numbers were found in the prompt at all) — callers should
+            fall back to the ungrounded digit-by-digit behaviour in that
+            case, e.g. for computed values that never appear literally
+            in the prompt.
+        """
+        if not self._prompt_numbers:
+            return None
+        s = self._number_so_far
+        matches = [n for n in self._prompt_numbers if n.startswith(s)]
+        return matches or None
+
     def _number_next_chars(self) -> set[str]:
-        """Return chars that continue or end the current number."""
+        """Return chars that continue or end the current number.
+
+        When the value being typed matches a number that appears
+        literally in the prompt, decoding is "grounded": only the
+        character that keeps matching that exact prompt number is
+        offered, so a copy of a long/repetitive number can't silently
+        drift into a different value. Growth is otherwise bounded
+        (``MAX_INT_DIGITS`` / ``MAX_FRAC_DIGITS``) so the value is
+        always eventually forced toward a terminator, even if nothing
+        else would make the model stop extending it.
+        """
+        grounded = self._grounded_candidates()
+        if grounded is not None:
+            return self._grounded_number_next_chars(grounded)
+
         s = self._number_so_far
         has_digit = any(c in DIGITS for c in s)
         chars: set[str] = set(DIGITS)
@@ -138,12 +216,39 @@ class FunctionCallConstraint:
             chars.add("-")
         if "." not in s and has_digit:
             intpart = s[1:] if s.startswith("-") else s
-            if intpart == "0":
+            if intpart == "0" or len(intpart) >= MAX_INT_DIGITS:
                 chars -= DIGITS
             if self._number_type != "integer":
                 chars.add(".")
+        elif "." in s:
+            frac = s.split(".", 1)[1]
+            if len(frac) >= MAX_FRAC_DIGITS:
+                chars -= DIGITS
         if self._number_complete():
             chars.add(self._number_terminator())
+        return chars
+
+    def _grounded_number_next_chars(self, grounded: list[str]) -> set[str]:
+        """Next chars restricted to those continuing a prompt number.
+
+        Args:
+            grounded: Prompt numbers that ``self._number_so_far`` is
+                currently a prefix of (from ``_grounded_candidates``).
+        """
+        s = self._number_so_far
+        pos = len(s)
+        chars: set[str] = set()
+        for n in grounded:
+            if len(n) > pos:
+                chars.add(n[pos])
+            elif n == s:
+                # Fully matched one of the prompt numbers. A "number"
+                # (float) parameter still needs a decimal point to be
+                # a valid JSON float; an "integer" one can terminate.
+                if self._number_type == "number" and "." not in n:
+                    chars.add(".")
+                else:
+                    chars.add(self._number_terminator())
         return chars
 
     def _boolean_next_chars(self) -> set[str]:
@@ -158,11 +263,18 @@ class FunctionCallConstraint:
         return chars
 
     def _string_next_chars(self) -> set[str]:
-        """Return chars legal at the current point of a string value."""
+        """Return chars legal at the current point of a string value.
+
+        Once ``self._string_len`` reaches ``MAX_STRING_CHARS`` only
+        the closing quote remains legal, so an open-ended string
+        cannot grow forever if the model never wants to close it.
+        """
         if not self._string_opened:
             return {'"'}
         if self._prev_was_backslash:
             return set('"\\/bfnrt')
+        if self._string_len >= MAX_STRING_CHARS:
+            return {'"'}
         return set(PRINTABLE)
 
     def _function_by_name(self, name: str) -> FunctionDefinition:
@@ -185,6 +297,7 @@ class FunctionCallConstraint:
             self._key_text,
             self._number_so_far,
             self._string_opened,
+            self._string_len,
             self._number_type,
             self._bool_so_far,
         )
@@ -202,6 +315,7 @@ class FunctionCallConstraint:
             self._key_text,
             self._number_so_far,
             self._string_opened,
+            self._string_len,
             self._number_type,
             self._bool_so_far,
         ) = snap
@@ -330,6 +444,7 @@ class FunctionCallConstraint:
             else:
                 self._enter(Phase.VALUE_STRING)
                 self._string_opened = False
+                self._string_len = 0
                 self._prev_was_backslash = False
 
     def _advance_number(self, char: str) -> None:
@@ -375,7 +490,9 @@ class FunctionCallConstraint:
 
         A closing quote ends the string unless it follows an unescaped
         backslash. The string owns its closing quote, so on close we go
-        straight to the following separator or suffix.
+        straight to the following separator or suffix. ``string_len``
+        counts real characters written (an escape pair counts once)
+        and is what ``_string_next_chars`` bounds against.
         """
         self._output += char
         if not self._string_opened:
@@ -383,6 +500,7 @@ class FunctionCallConstraint:
             return
         if self._prev_was_backslash:
             self._prev_was_backslash = False
+            self._string_len += 1
             return
         if char == "\\":
             self._prev_was_backslash = True
@@ -393,6 +511,8 @@ class FunctionCallConstraint:
                 self._enter(Phase.SEPARATOR)
             else:
                 self._enter(Phase.SUFFIX)
+            return
+        self._string_len += 1
 
     def _on_literal_complete(self) -> None:
         """Transition out of a fixed literal once fully emitted."""
