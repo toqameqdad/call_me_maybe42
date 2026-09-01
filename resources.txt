@@ -1,5 +1,9 @@
-https://github.com/eepylaurie/call-me-maybe
+
+<<<<<<< Updated upstream
 https://nanonets.com/cookbooks/structured-llm-outputs/basic-concepts/sampling¬
 https://huggingface.co/docs/transformers/en/tokenizer_summary
 https://docs.astral.sh/uv/
 https://huggingface.co/Qwen/Qwen3-0.6B
+=======
+https://nanonets.com/cookbooks/structured-llm-outputs/basic-concepts/sampling
+>>>>>>> Stashed changes

@@ -1,94 +1,34 @@
-"""Pydantic models used by the Call Me Maybe project."""
+"""Pydantic data models for the function-calling project."""
 
+from __future__ import annotations
 from typing import Any
-
-from pydantic import BaseModel, ConfigDict, Field
-
-
-class ParameterDefinition(BaseModel):
-    """Describe one function parameter."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: str = Field(
-        ...,
-        description="JSON value type of the parameter.",
-    )
+from pydantic import BaseModel, Field
 
 
-class ReturnDefinition(BaseModel):
-    """Describe a function return value."""
+class ParameterSpec(BaseModel):
+    """Type specification for one parameter or return value."""
 
-    model_config = ConfigDict(extra="forbid")
-
-    type: str = Field(
-        ...,
-        description="JSON value type returned by the function.",
-    )
+    type: str
 
 
 class FunctionDefinition(BaseModel):
-    """Describe one callable function."""
+    """One callable function the model may choose to invoke."""
 
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(
-        ...,
-        description="Name of the function.",
-    )
-
-    description: str = Field(
-        ...,
-        description="Human-readable description of the function.",
-    )
-
-    parameters: dict[str, ParameterDefinition] = Field(
-        default_factory=dict,
-        description="Function parameter definitions.",
-    )
-
-    returns: ReturnDefinition = Field(
-        ...,
-        description="Function return type definition.",
-    )
+    name: str
+    description: str = ""
+    parameters: dict[str, ParameterSpec] = Field(default_factory=dict)
+    returns: ParameterSpec | None = None
 
 
 class TestPrompt(BaseModel):
-    """Represent one input prompt."""
+    """A single natural-language request to process."""
 
-    model_config = ConfigDict(extra="forbid")
-
-    prompt: str = Field(
-        ...,
-        description="Natural-language user request.",
-    )
+    prompt: str
 
 
-class FunctionCallResult(BaseModel):
-    """Represent one final function-calling result.
+class FunctionCall(BaseModel):
+    """The structured result produced for one prompt."""
 
-    The serialized object contains exactly:
-
-        {
-            "prompt": "...",
-            "name": "...",
-            "parameters": {...}
-        }
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    prompt: str = Field(
-        ...,
-        description="Original user prompt.",
-    )
-
-    name: str = Field(
-        ...,
-        description="Function selected by the LLM.",
-    )
-
-    parameters: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Arguments generated for the function.",
-    )
+    prompt: str
+    name: str
+    parameters: dict[str, Any] = Field(default_factory=dict)

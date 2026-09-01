@@ -1,127 +1,74 @@
-"""Vocabulary loading and token/ID lookup utilities."""
+"""Vocabulary: map between token IDs and their real text."""
 
+from __future__ import annotations
 import json
+from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
 
+@lru_cache(maxsize=1)
+def _byte_to_char() -> dict[int, str]:
+    """Build GPT-2's byte -> printable-unicode mapping.
 
-class Vocabulary(BaseModel):
-    """Represent the model vocabulary.
-
-    The vocabulary provides lookup in both directions between token
-    strings and integer token IDs.
+    Returns:
+        A dict from each byte value (0-255) to the single character
+        used to represent it in ``vocab.json``.
     """
+    printable = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("\xa1"), ord("\xac") + 1))
+        + list(range(ord("\xae"), ord("\xff") + 1))
+    )
+    byte_to_uni = {b: chr(b) for b in printable}
+    next_code = 0
+    for b in range(256):
+        if b not in byte_to_uni:
+            byte_to_uni[b] = chr(256 + next_code)
+            next_code += 1
+    return byte_to_uni
 
-    model_config = ConfigDict(frozen=True)
 
-    token_to_id: dict[str, int] = Field(default_factory=dict)
-    id_to_token: dict[int, str] = Field(default_factory=dict)
+class Vocabulary:
+    """Two-way mapping between token IDs and their real text."""
 
-    @classmethod
-    def from_file(cls, path: str | Path) -> "Vocabulary":
-        """Load a vocabulary from a JSON file.
+    def __init__(self, vocab_path: str | Path) -> None:
+        """Load the vocabulary file and build the lookup tables.
 
         Args:
-            path: Path to the vocabulary JSON file.
-
-        Returns:
-            A populated Vocabulary instance.
+            vocab_path: Path to the model's ``vocab.json``.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
-            json.JSONDecodeError: If the file is invalid JSON.
-            ValueError: If the vocabulary format is invalid.
+            OSError: If the file cannot be read.
+            ValueError: If the file is not a valid token->id mapping.
         """
-        vocabulary_path = Path(path)
+        with Path(vocab_path).open("r", encoding="utf-8") as handle:
+            raw: dict[str, int] = json.load(handle)
+        if not isinstance(raw, dict):
+            raise ValueError("vocab.json must be a token->id object.")
 
-        if not vocabulary_path.is_file():
-            raise FileNotFoundError(
-                f"Vocabulary file not found: {vocabulary_path}"
-            )
+        byte_to_uni = _byte_to_char()
+        self._char_to_byte = {c: b for b, c in byte_to_uni.items()}
 
-        with vocabulary_path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        if not isinstance(data, dict):
-            raise ValueError("Vocabulary must be a JSON object.")
-
-        token_to_id: dict[str, int] = {}
-        seen_ids: set[int] = set()
-
-        for token, token_id in data.items():
-            if not isinstance(token, str):
-                raise ValueError(
-                    "Every vocabulary token must be a string."
-                )
-
-            if isinstance(token_id, bool) or not isinstance(
-                token_id, int
-            ):
-                raise ValueError(
-                    f"Token ID for {token!r} must be an integer."
-                )
-
-            if token_id < 0:
-                raise ValueError(
-                    f"Token ID cannot be negative: {token_id}"
-                )
-
-            if token_id in seen_ids:
-                raise ValueError(
-                    f"Duplicate token ID found: {token_id}"
-                )
-
-            seen_ids.add(token_id)
-            token_to_id[token] = token_id
-
-        id_to_token = {
-            token_id: token
-            for token, token_id in token_to_id.items()
+        self._id_to_encoded: dict[int, str] = {
+            tid: tok for tok, tid in raw.items()
         }
 
-        return cls(
-            token_to_id=token_to_id,
-            id_to_token=id_to_token,
-        )
-
-    @property
-    def size(self) -> int:
-        """Return the number of tokens."""
-        return len(self.token_to_id)
-
-    def get_token_id(self, token: str) -> int:
-        """Return the ID associated with a token.
+    def token_text(self, token_id: int) -> str:
+        """Return the real text a token contributes.
 
         Args:
-            token: Token string.
+            token_id: The token's integer ID.
 
         Returns:
-            The corresponding token ID.
+            The decoded string (e.g. id 279 -> " the").
 
         Raises:
-            KeyError: If the token does not exist.
+            KeyError: If the token ID is not in the vocabulary.
         """
-        return self.token_to_id[token]
+        encoded = self._id_to_encoded[token_id]
+        data = bytes(self._char_to_byte[ch] for ch in encoded)
+        return data.decode("utf-8", errors="replace")
 
-    def get_token(self, token_id: int) -> str:
-        """Return the token associated with an ID.
-
-        Args:
-            token_id: Token ID.
-
-        Returns:
-            The corresponding token string.
-
-        Raises:
-            KeyError: If the ID does not exist.
-        """
-        return self.id_to_token[token_id]
-
-    def has_token(self, token: str) -> bool:
-        """Return whether a token exists."""
-        return token in self.token_to_id
-
-    def has_token_id(self, token_id: int) -> bool:
-        """Return whether a token ID exists."""
-        return token_id in self.id_to_token
+    def __len__(self) -> int:
+        """Return the number of tokens in the vocabulary."""
+        return len(self._id_to_encoded)

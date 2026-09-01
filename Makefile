@@ -1,27 +1,37 @@
-.PHONY: install run debug clean lint lint-strict
+ifneq ($(wildcard /goinfre/$(USER)),)
+UV_ENV := UV_CACHE_DIR=/goinfre/$(USER)/uv-cache \
+	HF_HOME=/goinfre/$(USER)/hf-cache \
+	UV_PROJECT_ENVIRONMENT=/goinfre/$(USER)/call_me_maybe-venv \
+	UV_LINK_MODE=copy
+else
+UV_ENV :=
+endif
+
+.PHONY: install run debug clean lint lint-strict test
 
 install:
-	uv sync
+	$(UV_ENV) uv sync
 
 run:
-	uv run python3 -m src
+	$(UV_ENV) uv run python -m src
 
 debug:
-	uv run python3 -m pdb -m src
+	$(UV_ENV) uv run python -m pdb -m src
 
 clean:
-	find . -type d -name "__pycache__" -exec rm -rf {} +
-	find . -type d -name ".mypy_cache" -exec rm -rf {} +
+	rm -rf __pycache__ */__pycache__ */*/__pycache__ .mypy_cache
+	rm -rf .pytest_cache
 	rm -rf data/output
 
 lint:
-	flake8 src --exclude=.venv,venv,__pycache__,.git
-	mypy src --warn-return-any \
-		--warn-unused-ignores \
-		--ignore-missing-imports \
-		--disallow-untyped-defs \
+	$(UV_ENV) uv run flake8 . --extend-exclude=.venv,llm_sdk
+	$(UV_ENV) uv run mypy . --warn-return-any --warn-unused-ignores \
+		--ignore-missing-imports --disallow-untyped-defs \
 		--check-untyped-defs
 
 lint-strict:
-	uv run python3 -m flake8 .
-	uv run python3 -m mypy . --strict
+	$(UV_ENV) uv run flake8 . --extend-exclude=.venv,llm_sdk
+	$(UV_ENV) uv run mypy . --strict
+
+test:
+	$(UV_ENV) uv run python -m pytest tests/ -v
