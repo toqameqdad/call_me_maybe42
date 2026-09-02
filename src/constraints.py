@@ -37,24 +37,10 @@ DIGITS = set("0123456789")
 PRINTABLE = frozenset(chr(c) for c in range(0x20, 0x7F))
 BOOLEANS = ("true", "false")
 
-# Hard bounds on open-ended values. These exist purely so a stuck or
-# ambiguous prompt cannot leave the decoder spinning on the same value
-# forever (e.g. re-adding digits or characters past any point a real
-# answer would need). They are set far above what any legitimate
-# large number or ordinary string would require, so normal generation
-# always finishes long before hitting them.
 MAX_INT_DIGITS = 40
 MAX_FRAC_DIGITS = 6
 MAX_STRING_CHARS = 300
 
-# Matches integers and decimals (optionally signed) written literally
-# in a prompt, e.g. "222222222222222" or "-3.14". Used to "ground"
-# number decoding: when the value being copied for a parameter matches
-# a number that actually appears in the prompt, we restrict the next
-# character to only what keeps it matching that number, so the model
-# cannot silently swap/garble digits mid-copy. This is a decoding-time
-# guard, not a hardcoded value — it works for whatever numbers happen
-# to be in whatever prompt is given.
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
@@ -113,7 +99,7 @@ class FunctionCallConstraint:
         if not functions:
             raise ValueError("No function definitions were provided.")
         self._functions = functions
-        self._names = [fn.name for fn in functions]
+        self._names = [fn.name for fn in functions] + ["NO_FUNCTION"]
         self._prompt_numbers = _extract_prompt_numbers(prompt) if prompt else []
 
         self._phase = Phase.PREFIX
@@ -138,8 +124,11 @@ class FunctionCallConstraint:
     def _params(self) -> list[tuple[str, str]]:
         """Return the chosen function's (key, type) pairs in order."""
         if self._chosen is None:
-            raise ValueError("no function chosen yet")
-        return [(k, s.type) for k, s in self._chosen.parameters.items()]
+            return []
+        return [
+            (k, s.type)
+            for k, s in self._chosen.parameters.items()
+        ]
 
     def _more_params(self) -> bool:
         """Whether parameters remain after the current one."""
@@ -282,7 +271,7 @@ class FunctionCallConstraint:
         for fn in self._functions:
             if fn.name == name:
                 return fn
-        raise ValueError(f"unknown function name: {name}")
+        return None
 
     def _snapshot(self) -> _Snapshot:
         """Capture all mutable state so it can be restored."""
@@ -426,8 +415,14 @@ class FunctionCallConstraint:
         """
         self._name_so_far += char
         if self._name_so_far in self._names:
-            self._chosen = self._function_by_name(self._name_so_far)
-            self._enter(Phase.AFTER_NAME)
+            if self._name_so_far == "NO_FUNCTION":
+                self._chosen = None
+                self._enter(Phase.AFTER_NAME)
+            else:
+                self._chosen = self._function_by_name(
+                    self._name_so_far
+                )
+                self._enter(Phase.AFTER_NAME)
 
     def _advance_param_key(self) -> None:
         """Walk the dynamic '"key": ' literal, then enter the value."""

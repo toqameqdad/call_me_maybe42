@@ -5,7 +5,11 @@ import json
 from collections.abc import Sequence
 from llm_sdk import Small_LLM_Model
 from .decoder import ConstrainedDecoder, StepFn
-from .models import FunctionCall, FunctionDefinition
+from .models import (
+    FunctionCall,
+    FunctionDefinition,
+    validate_call_parameters,
+)
 from .vocabulary import Vocabulary
 
 
@@ -13,6 +17,10 @@ def build_prompt(prompt: str, functions: list[FunctionDefinition]) -> str:
     """Build the steering prompt shown to the model."""
     lines = [
         "You convert requests into function calls.",
+        "Select a function only if it directly matches the request.",
+        "Do not force a function choice for unrelated requests.",
+        "Do not invent values for missing information.",
+        "If no function matches the request, output NO_FUNCTION.",
         "Available functions:",
     ]
     for fn in functions:
@@ -52,18 +60,46 @@ class Pipeline:
         return list(self._model.get_logits_from_input_ids(ids))
 
     def run(self, prompt: str, on_step: StepFn | None = None) -> FunctionCall:
-        """Generate the function call for one prompt.
-
-        Args:
-            prompt: The natural-language request.
-            on_step: Optional per-token trace callback.
-
-        Returns:
-            A schema-valid :class:`FunctionCall`.
-        """
         text = build_prompt(prompt, self._functions)
-        raw = self._decoder.decode(text, on_step=on_step)
-        data = json.loads(raw)
-        return FunctionCall(
-            prompt=prompt, name=data["name"], parameters=data["parameters"]
+
+        raw = self._decoder.decode(
+            text,
+            on_step=on_step,
         )
+
+        data = json.loads(raw)
+
+        name = data["name"]
+        parameters = data["parameters"]
+
+        if name == "NO_FUNCTION":
+            raise ValueError(
+                "No suitable function found for this request"
+            )
+
+        function = next(
+            (
+                fn
+                for fn in self._functions
+                if fn.name == name
+            ),
+            None,
+        )
+
+        if function is None:
+            raise ValueError(
+                f"Unknown function generated: {name}"
+            )
+
+        validate_call_parameters(
+            function,
+            parameters,
+        )
+
+        return FunctionCall(
+            prompt=prompt,
+            name=name,
+            parameters=parameters,
+        )
+    
+    

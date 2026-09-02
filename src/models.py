@@ -60,3 +60,43 @@ def validate_function_list(functions: list[FunctionDefinition]) -> None:
     duplicates = {n for n in names if names.count(n) > 1}
     if duplicates:
         raise ValueError(f"Duplicate function name(s): {sorted(duplicates)}")
+
+def validate_call_parameters(
+    function: FunctionDefinition,
+    parameters: dict[str, Any],
+) -> None:
+    """Validate generated parameters against function schema."""
+
+    expected = function.parameters
+
+    if set(parameters.keys()) != set(expected.keys()):
+        raise ValueError(
+            "Generated parameters do not match function schema."
+        )
+
+    for name, spec in expected.items():
+        value = parameters[name]
+
+        if spec.type == "integer":
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(
+                    f"{name} must be an integer"
+                )
+
+        elif spec.type == "number":
+            if not isinstance(value, (int, float)):
+                raise ValueError(
+                    f"{name} must be a number"
+                )
+
+        elif spec.type == "string":
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"{name} must be a string"
+                )
+
+        elif spec.type == "boolean":
+            if not isinstance(value, bool):
+                raise ValueError(
+                    f"{name} must be boolean"
+                )
