@@ -3,6 +3,7 @@
 from __future__ import annotations
 from collections.abc import Callable, Sequence
 import numpy as np
+import numpy.typing as npt
 from .constraints import FunctionCallConstraint
 from .models import FunctionDefinition
 from .vocabulary import Vocabulary
@@ -84,9 +85,9 @@ class ConstrainedDecoder:
             counts: Number of prior times each token id was chosen
                 this decode, used to penalise repeats.
         """
-        arr = np.asarray(logits, dtype=np.float64)
-        masked = np.full(arr.shape, -np.inf, dtype=np.float64)
-        idx = np.asarray(legal, dtype=np.int64)
+        arr: npt.NDArray = np.asarray(logits, dtype=np.float64)
+        masked: npt.NDArray = np.full(arr.shape, -np.inf, dtype=np.float64)
+        idx: npt.NDArray = np.asarray(legal, dtype=np.int64)
         masked[idx] = arr[idx]
         for tid, count in counts.items():
             if count and masked[tid] != -np.inf:

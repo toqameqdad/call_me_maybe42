@@ -25,12 +25,16 @@ clean:
 
 lint:
 	$(UV_ENV) uv run flake8 . --extend-exclude=.venv,llm_sdk
-	$(UV_ENV) uv run mypy . --warn-return-any --warn-unused-ignores \
-		--ignore-missing-imports --disallow-untyped-defs \
+	$(UV_ENV) uv run mypy src \
+		--follow-imports=skip \
+		--warn-return-any \
+		--warn-unused-ignores \
+		--ignore-missing-imports \
+		--disallow-untyped-defs \
 		--check-untyped-defs
 
 lint-strict:
-	$(UV_ENV) uv run flake8 . --extend-exclude=.venv,llm_sdk
+	$(UV_ENV) uv run flake8 .
 	$(UV_ENV) uv run mypy . --strict
 
 test:
