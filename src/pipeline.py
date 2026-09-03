@@ -101,5 +101,3 @@ class Pipeline:
             name=name,
             parameters=parameters,
         )
-    
-    

@@ -108,15 +108,24 @@ class ConstrainedDecoder:
             DecodingError: If no legal token exists or the step cap is
                 exceeded before completion.
         """
-        constraint = FunctionCallConstraint(self._functions ,prompt= prompt)
+        constraint = FunctionCallConstraint(self._functions, prompt=prompt)
         input_ids = list(self._encode(prompt))
         generated = ""
         steps = 0
         counts: dict[int, int] = {}
+        last_phase = constraint.phase
         while not constraint.is_complete():
             if steps >= self._max_steps:
                 raise DecodingError("exceeded max decoding steps")
             steps += 1
+            if constraint.phase != last_phase:
+                # Repetition counts must not leak across fields: a
+                # phase change means we've moved on to a new literal,
+                # key, or value, so prior counts (e.g. from copying
+                # source_string) must not bias the next field's
+                # (e.g. regex) token choice.
+                counts = {}
+                last_phase = constraint.phase
             logits = self._logits_fn(input_ids)
             legal = self._legal_token_ids(constraint)
             if not legal:
@@ -126,6 +135,9 @@ class ConstrainedDecoder:
             text = self._id_to_text[best]
             for ch in text:
                 constraint.advance(ch)
+            if constraint.phase != last_phase:
+                counts = {}
+                last_phase = constraint.phase
             generated += text
             input_ids.append(best)
             if on_step is not None:

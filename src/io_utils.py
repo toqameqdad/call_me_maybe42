@@ -72,8 +72,8 @@ def load_function_definitions(path: Path) -> list[FunctionDefinition]:
             f"{path}: expected a JSON array of function definitions."
         )
     try:
-        functions = [FunctionDefinition(**item) for item in raw] 
-        validate_function_list(functions)  
+        functions = [FunctionDefinition(**item) for item in raw]
+        validate_function_list(functions)
         return functions
     except ValidationError as exc:
         raise InputError(

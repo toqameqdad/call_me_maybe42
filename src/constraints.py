@@ -100,7 +100,9 @@ class FunctionCallConstraint:
             raise ValueError("No function definitions were provided.")
         self._functions = functions
         self._names = [fn.name for fn in functions] + ["NO_FUNCTION"]
-        self._prompt_numbers = _extract_prompt_numbers(prompt) if prompt else []
+        self._prompt_numbers = (
+            _extract_prompt_numbers(prompt) if prompt else []
+        )
 
         self._phase = Phase.PREFIX
         self._output = ""
@@ -266,7 +268,7 @@ class FunctionCallConstraint:
             return {'"'}
         return set(PRINTABLE)
 
-    def _function_by_name(self, name: str) -> FunctionDefinition:
+    def _function_by_name(self, name: str) -> FunctionDefinition | None:
         """Return the definition matching an exact function name."""
         for fn in self._functions:
             if fn.name == name:

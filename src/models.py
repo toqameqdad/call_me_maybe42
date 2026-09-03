@@ -34,6 +34,7 @@ class FunctionDefinition(BaseModel):
             raise ValueError("Function name must not be empty or blank.")
         return value
 
+
 class TestPrompt(BaseModel):
     """A single natural-language request to process."""
 
@@ -60,6 +61,7 @@ def validate_function_list(functions: list[FunctionDefinition]) -> None:
     duplicates = {n for n in names if names.count(n) > 1}
     if duplicates:
         raise ValueError(f"Duplicate function name(s): {sorted(duplicates)}")
+
 
 def validate_call_parameters(
     function: FunctionDefinition,
