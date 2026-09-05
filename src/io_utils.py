@@ -75,7 +75,7 @@ def load_function_definitions(path: Path) -> list[FunctionDefinition]:
         functions = [FunctionDefinition(**item) for item in raw]
         validate_function_list(functions)
         return functions
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         raise InputError(
             f"{path}: invalid function definition:\n{exc}"
         ) from exc

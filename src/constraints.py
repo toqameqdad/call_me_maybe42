@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import re
+from collections.abc import Container
 from enum import Enum, auto
 from .models import FunctionDefinition
 
@@ -22,7 +23,7 @@ class Phase(Enum):
 
 
 PREFIX_TEXT = '{"name": "'
-AFTER_NAME_TEXT = '", "parameters": {'
+AFTER_NAME_TEXT = ', "parameters": {'
 SEPARATOR_TEXT = ", "
 SUFFIX_TEXT = "}}"
 
@@ -36,6 +37,25 @@ _LITERALS = {
 DIGITS = set("0123456789")
 PRINTABLE = frozenset(chr(c) for c in range(0x20, 0x7F))
 BOOLEANS = ("true", "false")
+
+
+class _AnyJsonStringChar:
+    """Membership test for any legal *raw* JSON string character.
+
+    JSON strings may contain any Unicode code point except the
+    control characters U+0000-U+001F (which must be escaped, e.g.
+    ``\\n``). Restricting this to ASCII PRINTABLE would make it
+    structurally impossible to ever emit non-ASCII text (Arabic,
+    accented Latin, emoji, ...) no matter how confident the model
+    is, so this checks the code point range directly instead of
+    materialising a frozenset of every legal character.
+    """
+
+    def __contains__(self, ch: object) -> bool:
+        return isinstance(ch, str) and len(ch) == 1 and ord(ch) >= 0x20
+
+
+ANY_STRING_CHAR = _AnyJsonStringChar()
 
 MAX_INT_DIGITS = 40
 MAX_FRAC_DIGITS = 6
@@ -127,10 +147,7 @@ class FunctionCallConstraint:
         """Return the chosen function's (key, type) pairs in order."""
         if self._chosen is None:
             return []
-        return [
-            (k, s.type)
-            for k, s in self._chosen.parameters.items()
-        ]
+        return [(k, s.type) for k, s in self._chosen.parameters.items()]
 
     def _more_params(self) -> bool:
         """Whether parameters remain after the current one."""
@@ -159,12 +176,21 @@ class FunctionCallConstraint:
         return body.isdigit()
 
     def _name_next_chars(self) -> set[str]:
-        """Return chars continuing at least one allowed name."""
+        """Return chars continuing at least one allowed name.
+
+        The closing quote is only offered once the text typed so
+        far is itself a complete, valid name — it is the model's
+        explicit signal to stop there rather than keep extending
+        toward a longer name that shares the same prefix (e.g.
+        stopping at "fn_add" vs continuing to "fn_add_number").
+        """
         pos = len(self._name_so_far)
         chars: set[str] = set()
         for name in self._names:
             if name.startswith(self._name_so_far) and len(name) > pos:
                 chars.add(name[pos])
+        if self._name_so_far in self._names:
+            chars.add('"')
         return chars
 
     def _grounded_candidates(self) -> list[str] | None:
@@ -253,7 +279,7 @@ class FunctionCallConstraint:
             chars.add(self._number_terminator())
         return chars
 
-    def _string_next_chars(self) -> set[str]:
+    def _string_next_chars(self) -> Container[str]:
         """Return chars legal at the current point of a string value.
 
         Once ``self._string_len`` reaches ``MAX_STRING_CHARS`` only
@@ -266,7 +292,7 @@ class FunctionCallConstraint:
             return set('"\\/bfnrt')
         if self._string_len >= MAX_STRING_CHARS:
             return {'"'}
-        return set(PRINTABLE)
+        return ANY_STRING_CHAR
 
     def _function_by_name(self, name: str) -> FunctionDefinition | None:
         """Return the definition matching an exact function name."""
@@ -336,11 +362,11 @@ class FunctionCallConstraint:
         finally:
             self._restore(snap)
 
-    def allowed_next(self) -> set[str]:
-        """Return the set of characters legal as the next character.
+    def allowed_next(self) -> Container[str]:
+        """Return the characters legal as the next character.
 
         Returns:
-            A set of single-character strings. Empty only when the
+            A container supporting ``in``. Empty only when the
             machine is complete (nothing more may be emitted).
         """
         if self._phase in _LITERALS:
@@ -409,22 +435,22 @@ class FunctionCallConstraint:
             self._on_literal_complete()
 
     def _advance_name(self, char: str) -> None:
-        """Extend the chosen name and finish it once it matches.
+        """Extend the name, or lock it in on the closing quote.
 
-        Assumes no allowed name is a prefix of another (true for the
-        provided set). If names nested, we would instead wait for the
-        closing quote to disambiguate.
+        Committing only happens on the explicit closing quote (not
+        the instant ``_name_so_far`` matches a complete name), so a
+        shorter name never pre-empts a longer one that shares its
+        prefix (e.g. "fn_add" vs "fn_add_number") — the model stays
+        free to keep extending until it actually chooses to stop.
         """
-        self._name_so_far += char
-        if self._name_so_far in self._names:
+        if char == '"':
             if self._name_so_far == "NO_FUNCTION":
                 self._chosen = None
-                self._enter(Phase.AFTER_NAME)
             else:
-                self._chosen = self._function_by_name(
-                    self._name_so_far
-                )
-                self._enter(Phase.AFTER_NAME)
+                self._chosen = self._function_by_name(self._name_so_far)
+            self._enter(Phase.AFTER_NAME)
+            return
+        self._name_so_far += char
 
     def _advance_param_key(self) -> None:
         """Walk the dynamic '"key": ' literal, then enter the value."""

@@ -36,6 +36,3 @@ lint:
 lint-strict:
 	$(UV_ENV) uv run flake8 .
 	$(UV_ENV) uv run mypy . --strict
-
-test:
-	$(UV_ENV) uv run python -m pytest tests/ -v

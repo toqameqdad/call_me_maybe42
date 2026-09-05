@@ -1,14 +1,14 @@
 """Pydantic data models for the function-calling project."""
 
 from __future__ import annotations
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
 class ParameterSpec(BaseModel):
     """Type specification for one parameter or return value."""
 
-    type: str
+    type: Literal["string", "number", "integer", "boolean"]
 
 
 class FunctionDefinition(BaseModel):
@@ -72,33 +72,23 @@ def validate_call_parameters(
     expected = function.parameters
 
     if set(parameters.keys()) != set(expected.keys()):
-        raise ValueError(
-            "Generated parameters do not match function schema."
-        )
+        raise ValueError("Generated parameters do not match function schema.")
 
     for name, spec in expected.items():
         value = parameters[name]
 
         if spec.type == "integer":
             if not isinstance(value, int) or isinstance(value, bool):
-                raise ValueError(
-                    f"{name} must be an integer"
-                )
+                raise ValueError(f"{name} must be an integer")
 
         elif spec.type == "number":
             if not isinstance(value, (int, float)):
-                raise ValueError(
-                    f"{name} must be a number"
-                )
+                raise ValueError(f"{name} must be a number")
 
         elif spec.type == "string":
             if not isinstance(value, str):
-                raise ValueError(
-                    f"{name} must be a string"
-                )
+                raise ValueError(f"{name} must be a string")
 
         elif spec.type == "boolean":
             if not isinstance(value, bool):
-                raise ValueError(
-                    f"{name} must be boolean"
-                )
+                raise ValueError(f"{name} must be boolean")
