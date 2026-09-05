@@ -94,7 +94,12 @@ class ConstrainedDecoder:
                 masked[tid] -= self._repetition_penalty * count
         return int(np.argmax(masked))
 
-    def decode(self, prompt: str, on_step: StepFn | None = None) -> str:
+    def decode(
+        self,
+        prompt: str,
+        on_step: StepFn | None = None,
+        raw_prompt: str | None = None,
+    ) -> str:
         """Generate the JSON function call for a prompt.
 
         Args:
@@ -109,7 +114,10 @@ class ConstrainedDecoder:
             DecodingError: If no legal token exists or the step cap is
                 exceeded before completion.
         """
-        constraint = FunctionCallConstraint(self._functions, prompt=prompt)
+        constraint = FunctionCallConstraint(
+            self._functions,
+            prompt=raw_prompt if raw_prompt is not None else prompt,
+        )
         input_ids = list(self._encode(prompt))
         generated = ""
         steps = 0

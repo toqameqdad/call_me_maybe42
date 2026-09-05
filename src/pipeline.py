@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 import json
+import sys
 from collections.abc import Sequence
 from llm_sdk import Small_LLM_Model
+from .constraints import extract_prompt_numbers
 from .decoder import ConstrainedDecoder, StepFn
 from .models import (
     FunctionCall,
@@ -11,6 +13,32 @@ from .models import (
     validate_call_parameters,
 )
 from .vocabulary import Vocabulary
+
+
+def _warn_if_undergrounded(prompt: str, chosen: FunctionDefinition) -> None:
+    """Warn when the prompt has fewer literal numbers than needed.
+
+    This does not "understand" the prompt — it only counts numeric
+    literals vs. number/integer parameters. A shortfall means at
+    least one parameter was necessarily grounded to a number meant
+    for a different slot (e.g. "sum of 'toqa' and 3" only has one
+    literal number for fn_add_numbers's two number parameters), a
+    strong sign the output is unreliable even though it is valid
+    JSON. It is a heuristic, not a proof, so it only warns.
+    """
+    needed = sum(
+        1
+        for spec in chosen.parameters.values()
+        if spec.type in ("number", "integer")
+    )
+    available = len(extract_prompt_numbers(prompt))
+    if available < needed:
+        print(
+            f"warning: prompt has {available} literal number(s) but "
+            f"'{chosen.name}' needs {needed}; at least one argument "
+            "was likely grounded to the wrong value",
+            file=sys.stderr,
+        )
 
 
 def build_prompt(prompt: str, functions: list[FunctionDefinition]) -> str:
@@ -65,6 +93,7 @@ class Pipeline:
         raw = self._decoder.decode(
             text,
             on_step=on_step,
+            raw_prompt=prompt,
         )
 
         data = json.loads(raw)
@@ -73,23 +102,17 @@ class Pipeline:
         parameters = data["parameters"]
 
         if name == "NO_FUNCTION":
-            raise ValueError(
-                "No suitable function found for this request"
-            )
+            raise ValueError("No suitable function found for this request")
 
         function = next(
-            (
-                fn
-                for fn in self._functions
-                if fn.name == name
-            ),
+            (fn for fn in self._functions if fn.name == name),
             None,
         )
 
         if function is None:
-            raise ValueError(
-                f"Unknown function generated: {name}"
-            )
+            raise ValueError(f"Unknown function generated: {name}")
+
+        _warn_if_undergrounded(prompt, function)
 
         validate_call_parameters(
             function,

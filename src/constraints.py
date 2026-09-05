@@ -64,7 +64,7 @@ MAX_STRING_CHARS = 300
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
-def _extract_prompt_numbers(prompt: str) -> list[str]:
+def extract_prompt_numbers(prompt: str) -> list[str]:
     """Return every number literally written in ``prompt``, as text.
 
     Args:
@@ -75,6 +75,42 @@ def _extract_prompt_numbers(prompt: str) -> list[str]:
         (no float conversion, so precision/formatting is preserved).
     """
     return _NUMBER_RE.findall(prompt)
+
+
+def _is_groundable(
+    fn: FunctionDefinition, available: int, prompt_has_content: bool
+) -> bool:
+    """Check whether the prompt can plausibly supply ``fn``'s args.
+
+    Two independent checks:
+
+    - Numeric: each number/integer parameter is normally grounded to
+      a number written literally in the prompt (see
+      ``_grounded_candidates``). Needing more numeric arguments than
+      the prompt has literal numbers means at least one argument
+      would copy a number meant for a different slot (e.g. "sum of
+      'toqa' and 3" has one literal number for fn_add_numbers's two
+      parameters).
+    - Any-parameter: an empty (or whitespace-only) prompt carries no
+      information at all, so a function with *any* parameter (even
+      a string one, which has no literal-copy grounding of its own)
+      cannot be filled from real content — the model would have to
+      invent a value outright (e.g. hallucinating a name for
+      fn_greet when nothing was actually written).
+
+    Excluding the name here stops both failures before they start,
+    instead of only noticing them after the fact.
+    """
+    needed_numeric = sum(
+        1
+        for spec in fn.parameters.values()
+        if spec.type in ("number", "integer")
+    )
+    if needed_numeric > available:
+        return False
+    if fn.parameters and not prompt_has_content:
+        return False
+    return True
 
 
 _Snapshot = tuple[
@@ -119,10 +155,15 @@ class FunctionCallConstraint:
         if not functions:
             raise ValueError("No function definitions were provided.")
         self._functions = functions
-        self._names = [fn.name for fn in functions] + ["NO_FUNCTION"]
-        self._prompt_numbers = (
-            _extract_prompt_numbers(prompt) if prompt else []
-        )
+        self._prompt_numbers = extract_prompt_numbers(prompt) if prompt else []
+        prompt_has_content = bool(prompt and prompt.strip())
+        self._names = [
+            fn.name
+            for fn in functions
+            if _is_groundable(
+                fn, len(self._prompt_numbers), prompt_has_content
+            )
+        ] + ["NO_FUNCTION"]
 
         self._phase = Phase.PREFIX
         self._output = ""
