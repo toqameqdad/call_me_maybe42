@@ -1,11 +1,5 @@
 [
   {
-	"name": "fn_add",
-	"description": "A decoy function with no parameters.",
-	"parameters": {},
-	"returns": {"type": "string"}
-  },
-  {
     "name": "fn_add_numbers",
     "description": "Add two numbers together and return their sum.",
     "parameters": {
